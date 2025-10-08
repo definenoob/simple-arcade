@@ -80,7 +80,7 @@ python agents/agent_ChatAgent_0/agent.py --name bob
 
 -----
 
-## Why This Architecture is So Effective
+## Why This Architecture Wins
 
 The "magic" behind this setup isn't magic at all; it's a clever and robust separation of concerns, built on a foundation of cryptographic trust.
 
