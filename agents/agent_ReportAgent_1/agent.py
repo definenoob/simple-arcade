@@ -73,8 +73,9 @@ async def sign_outgoing_message(payload: dict) -> dict:
 @client.hook(direction=Direction.RECEIVE, priority=1)
 async def verify_incoming_message(payload: dict) -> Union[dict, None]:
     """
-    Verifies incoming messages, handling the server's wrapper and
-    silently ignoring any message that is not a valid, signed message.
+    Verifies incoming messages. If the signature is valid, it passes the
+    original, unmodified signed message wrapper to the receive handler.
+    It silently ignores any message that is invalid or not signed.
     """
     message_to_validate = None
 
@@ -95,7 +96,8 @@ async def verify_incoming_message(payload: dict) -> Union[dict, None]:
             print(f"\r[AUTH ERROR] Invalid signature. Discarding.")
             return None
             
-        return {"identity": signed_wrapper.public_key, "payload": signed_wrapper.payload}
+        # Signature is valid, return the original signed message for buffering
+        return message_to_validate
     except ValidationError:
         return None # Silently ignore non-signed messages
     except Exception as e:
@@ -107,24 +109,24 @@ async def verify_incoming_message(payload: dict) -> Union[dict, None]:
 @client.receive(route="")
 async def custom_receive(msg: dict) -> None:
     """
-    Handles verified messages that have passed through the security hook
-    and buffers them for reporting.
+    Handles verified signed messages that have passed through the security hook
+    and buffers the entire signed object for reporting.
     """
-    if not isinstance(msg, dict) or "identity" not in msg or "payload" not in msg:
+    # The hook has already validated the message structure.
+    if not isinstance(msg, dict) or "public_key" not in msg:
         return
 
-    verified_payload = msg['payload']
-    identity = msg['identity']
+    await message_buffer.put(msg)
     
-    await message_buffer.put(verified_payload)
-    
+    identity = msg['public_key']
     identity_snippet = identity.splitlines()[1][:20] + "..."
-    print(f"\r[Received and buffered message from {identity_snippet}]", flush=True)
+    print(f"\r[Validated and buffered signed message from {identity_snippet}]", flush=True)
 
 async def drain_buffer() -> dict:
     """
-    Drains the buffer and creates a structured batch report.
-    Returns a dictionary, which will then be signed by the hook.
+    Drains the buffer and creates a structured batch report containing the
+    original, unmodified signed messages.
+    Returns a dictionary, which will then be signed by the SEND hook.
     """
     global FRAME, TIME
     
@@ -170,4 +172,3 @@ if __name__ == "__main__":
         print("\nShutdown requested.")
     finally:
         print("Report agent shut down cleanly.")
-
