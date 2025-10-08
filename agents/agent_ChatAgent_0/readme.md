@@ -13,6 +13,20 @@ This agent is a fully-featured, secure, peer-to-peer multiplayer game client bui
 
 ---
 
+## Why Use Cryptography?
+
+In a traditional client-server game, the server is the single source of truth and security. But in this peer-to-peer model, clients must trust messages that come from other clients. Cryptography is what makes this trust possible.
+
+* **Identity**: A player's public key serves as their unique, unforgeable identity. Unlike a simple username that could be spoofed, only the player who owns the corresponding private key can act on behalf of that identity.
+
+* **Authenticity**: When "alice" sends a "shoot" command, she signs it with her private key. When "bob" receives this command, he uses alice's public key to verify the signature. If it's valid, he knows the command genuinely came from alice and not an imposter.
+
+* **Integrity**: The digital signature is tied to the exact content of the message. If an attacker intercepted a "move right" command and tried to change it to a "move left" command, the signature would no longer match the content. All other clients would detect the tampering and reject the invalid message. 
+
+This system creates a secure and decentralized environment where each agent can independently validate the actions of its peers, forming a "web of trust" without relying on a central authority.
+
+---
+
 ## Technical Features
 
 * **Peer-to-Peer Synchronization**: The game state is synchronized without a central game server. Each client processes a stream of events from a `ReportAgent` to build an identical simulation.
