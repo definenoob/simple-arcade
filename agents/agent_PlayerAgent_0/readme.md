@@ -48,10 +48,10 @@ Open a terminal and run the following commands:
 
 ```bash
 # Create an identity for player "alice"
-python agents/agent_ChatAgent_0/login.py --name alice
+python agents/agent_PlayerAgent_0/login.py --name alice
 
 # Create an identity for player "bob"
-python agents/agent_ChatAgent_0/login.py --name bob
+python agents/agent_PlayerAgent_0/login.py --name bob
 ```
 
 ### Step 2: Run the Server
@@ -73,10 +73,10 @@ python agents/agent_ReportAgent_1/agent.py
 
 ```bash
 # In a new terminal (Terminal 3), start a client for "alice"
-python agents/agent_ChatAgent_0/agent.py --name alice
+python agents/agent_PlayerAgent_0/agent.py --name alice
 
 # In a new terminal (Terminal 4), start a client for "bob"
-python agents/agent_ChatAgent_0/agent.py --name bob
+python agents/agent_PlayerAgent_0/agent.py --name bob
 ```
 
 Two Pygame windows will appear. You will see both players in the lobby in each window.
