@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 import json
-from typing import Union, Literal, Dict, Any
+from typing import Union, Literal, Dict, Any, List
 
 import pygame
 from pydantic import BaseModel, Field, ValidationError
@@ -44,6 +44,18 @@ class ServerNotification(BaseModel):
     jsonrpc: Literal["2.0"] = "2.0"
     method: str
     params: ServerNotificationParams
+
+# Models to understand incoming batch reports from other agents
+class BatchReportParams(BaseModel):
+    frameNumber: int
+    deltaEvents: List[Dict[str, Any]]
+    deltaTiming: int
+
+class BatchReportRequest(BaseModel):
+    jsonrpc: Literal["2.0"]
+    method: Literal["batch.report"]
+    params: BatchReportParams
+    id: Union[str, int]
 
 # Wrapper models that include the cryptographic signature
 class SignedWrapper(BaseModel):
@@ -131,7 +143,7 @@ async def verify_incoming_message(payload: dict) -> Union[dict, None]:
 async def receiver_handler(msg: dict) -> None:
     """
     Handles incoming notifications that have already been verified by the hook.
-    The `msg` is a dictionary containing the verified 'identity' and the 'payload'.
+    This can process both simple notifications and batch reports.
     """
     if not isinstance(msg, dict) or "identity" not in msg or "payload" not in msg:
         return
@@ -139,23 +151,33 @@ async def receiver_handler(msg: dict) -> None:
     try:
         verified_identity_key = msg["identity"]
         payload = msg["payload"]
-
-        # The payload could be a report or a simple notification.
-        # We can try to parse it as a ServerNotification.
-        notification = ServerNotification.model_validate(payload)
-        
         identity_snippet = verified_identity_key.splitlines()[1][:20] + "..."
-        print(f"\r[FROM {identity_snippet} | {notification.method}]: {notification.params.message}")
 
-    except ValidationError:
-        # If it's not a ServerNotification, it might be a batch report.
-        # For now, we'll just ignore it in this agent.
+        # Try to parse as a simple server notification first.
+        try:
+            notification = ServerNotification.model_validate(payload)
+            print(f"\r[FROM {identity_snippet} | {notification.method}]: {notification.params.message}")
+
+        except ValidationError:
+            # If it's not a notification, try to parse it as a batch report.
+            try:
+                report = BatchReportRequest.model_validate(payload)
+                num_events = len(report.params.deltaEvents)
+                frame_number = report.params.frameNumber
+                print(f"\r[FROM {identity_snippet} | Batch Report]: Received frame {frame_number} with {num_events} events.")
+            except ValidationError:
+                # Ignore any other message types that don't match.
+                pass
+    except Exception:
+        # General catch-all in case the outer `msg` structure is wrong.
         pass
+
 
 @client.send(route="")
 async def send_handler() -> dict:
     """
-    Constructs the core JSON-RPC request. The signing hook will wrap it.
+    Constructs the core JSON-RPC request for a single keystroke.
+    The signing hook will wrap it before sending.
     """
     try:
         event: pygame.event.Event = await event_queue.get()
