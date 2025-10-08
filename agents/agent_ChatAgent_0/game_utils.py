@@ -9,6 +9,7 @@ import asyncio
 from math import sqrt
 from typing import Dict, Any, List
 from pydantic import ValidationError
+from abc import ABC, abstractmethod
 
 # Import the data models
 try:
@@ -16,6 +17,35 @@ try:
 except ImportError:
     print("Error: models.py not found.")
     exit(1)
+
+# ---- Game Interface Definition ---------------------------------------------
+
+class IGameEngine(ABC):
+    """
+    Defines the public interface for a game engine, ensuring that any
+    concrete implementation provides the essential methods for managing
+    the game's lifecycle.
+    """
+
+    @abstractmethod
+    def process_report(self, report_params: BatchReportParams, action_queue: asyncio.Queue) -> None:
+        """Processes an authoritative batch report to update the game state."""
+        pass
+
+    @abstractmethod
+    def handle_input(self, action_queue: asyncio.Queue) -> bool:
+        """Handles user input and returns a flag to continue or quit."""
+        pass
+
+    @abstractmethod
+    def render(self) -> None:
+        """Renders the current game state to the display."""
+        pass
+
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Cleanly shuts down the game engine and its resources."""
+        pass
 
 # ---- Game Constants --------------------------------------------------------
 SCREEN_WIDTH = 800
@@ -30,7 +60,7 @@ SHOOT_COOLDOWN = 0.25
 MAX_HEALTH = 10
 
 # ---- GameEngine Class ------------------------------------------------------
-class GameEngine:
+class GameEngine(IGameEngine):
     """Manages the entire game state, logic, input handling, and rendering."""
     def __init__(self, player_name: str, client_public_key: str):
         # Identity of the local client
@@ -54,14 +84,14 @@ class GameEngine:
         self.font = pygame.font.SysFont(None, 50)
         self.small_font = pygame.font.SysFont(None, 24)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         """Cleanly shuts down the Pygame instance."""
         if pygame.get_init():
             pygame.quit()
             print("Pygame shut down cleanly.")
 
     # ---- Core Update Logic (The Game Tick) ---------------------------------
-    def process_report(self, report_params: BatchReportParams, action_queue: asyncio.Queue):
+    def process_report(self, report_params: BatchReportParams, action_queue: asyncio.Queue) -> None:
         """
         The main game tick. Processes the authoritative batch report and updates the game state.
         """
@@ -248,7 +278,7 @@ class GameEngine:
                 asyncio.create_task(action_queue.put({"type": "move", "dir": key}))
 
     # ---- Rendering ---------------------------------------------------------
-    def render(self):
+    def render(self) -> None:
         """Renders the current game state to the screen."""
         self.screen.fill((25, 25, 35)) # Background color
 
