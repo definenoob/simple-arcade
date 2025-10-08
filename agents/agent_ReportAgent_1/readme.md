@@ -1,43 +1,86 @@
-# `ReportAgent_1`
+Of course. A good README is essential for understanding the role of this critical agent. Here is a comprehensive `readme.md` for the `ReportAgent_1`.
 
-A secure, buffered reporting agent. It validates the digital signature of all incoming messages, aggregates them into batches based on a fixed time interval (frame rate), and sends a single, signed report containing the collection of original, validated messages.
+-----
 
-This agent demonstrates a security-conscious pipeline where it validates upstream messages before including them in its own signed reports, preserving the original signatures for downstream consumers.
+### `agents/agent_ReportAgent_1/readme.md`
+
+````markdown
+# `ReportAgent_1` - The Game Clock and Event Reporter
+
+This agent serves a critical and specialized role: it is the **authoritative clock and event aggregator** for the multiplayer game. It does not contain any game logic itself. Instead, it listens for actions from all game clients, verifies their authenticity, bundles them into timed reports, and broadcasts these reports back to all players.
+
+This architecture ensures that every player's game is synchronized to the same clock and the same sequence of events, which is essential for fair and consistent multiplayer gameplay.
+
+---
 
 ## Behavior
 
+The `ReportAgent` follows a strict, continuous loop to ensure a steady flow of game state information.
+
 <details>
-<summary><b>(Click to expand)</b> The agent goes through these steps:</summary>
+<summary><b>(Click to expand)</b> The agent's operational loop:</summary>
 <br>
 
-1.  **Verification Hook:** The `verify_incoming_message` hook (`@client.hook(direction=Direction.RECEIVE)`) intercepts all incoming messages.
-    * It parses the message expecting a `SignedWrapper` format (`payload`, `signature`, `public_key`).
-    * It uses the provided public key to verify the signature against the payload.
-    * If the signature is valid, it returns the **entire, original signed message** to be processed further. Invalid or unsigned messages are silently discarded.
-2.  **Receive Handler:** The receive handler (`@client.receive(route="")`) receives the validated, signed message object from the hook.
-    * It enqueues the full object into an internal `asyncio.Queue` called `message_buffer`.
-3.  **Send Handler:** The send handler (`@client.send(route="")`) runs in a loop controlled by `FPS` (Frames Per Second).
-    * In each "frame," it drains all buffered messages from the queue.
-    * It constructs a JSON-RPC `batch.report` payload, where the `deltaEvents` field is a list of the original signed messages it collected.
-4.  **Signing Hook:** Before the batch report is sent, the `sign_outgoing_message` hook (`@client.hook(direction=Direction.SEND)`) signs the entire report using the `ReportAgent_1`'s own private key.
+1.  **Listens for Player Actions**: The agent connects to the server and waits for messages from any of the `GameAgent` clients (e.g., `player.join`, `player.move`, `player.shoot`).
 
-This creates a nested signature structure: the reporter's signature provides authenticity for the *batch*, while the preserved signatures within the batch provide authenticity for each individual *event*.
+2.  **Verifies Every Message**: A `RECEIVE` hook (`verify_incoming_message`) intercepts every message.
+    * It expects messages to be in a `SignedWrapper` format.
+    * It uses the public key included in the wrapper to verify the digital signature. This proves the message came from a legitimate player and was not tampered with.
+    * If a message is valid, the hook passes the **entire, original signed message** forward. Invalid or unsigned messages are silently discarded.
+
+3.  **Buffers Validated Actions**: The main receive handler (`custom_receive`) takes the verified messages from the hook and places them into an internal `asyncio.Queue` called `message_buffer`.
+
+4.  **Creates Timed Batch Reports**: The send handler (`custom_send`) runs on a loop controlled by `FPS` (Frames Per Second). In each "frame," it:
+    * Drains all messages currently in the `message_buffer`.
+    * Measures the **exact time elapsed** in nanoseconds since the last report was sent. This becomes the `deltaTiming` value.
+    * Constructs a `batch.report` payload, placing the list of original, signed player actions into the `deltaEvents` field.
+
+5.  **Signs and Broadcasts the Report**: Before the `batch.report` is sent, a `SEND` hook (`sign_outgoing_message`) signs the entire report with the `ReportAgent_1`'s own private key. This authenticates the report itself. The server then broadcasts this signed report to all connected game clients.
+
+The game clients receive this report, verify its signature, and then use the `deltaTiming` and `deltaEvents` within it to advance their local simulation of the game. 
 
 </details>
 
+---
+
 ## SDK Features Used
 
-| Feature                         | Description                                                              |
-| ------------------------------- | ------------------------------------------------------------------------ |
-| `SummonerClient(name=...)`      | Instantiates and manages the agent                                       |
-| `@client.hook(direction=...)`   | Intercepts messages to add security (signing and verification)           |
-| `@client.receive(route="")`     | Buffers the verified, signed messages into an internal queue             |
-| `@client.send(route="")`        | Periodically drains the buffer and constructs the signed batch report    |
-| `client.run(host, port, ...)`   | Connects to the server and starts the asyncio event loop                 |
+| Feature                         | Description                                                                                               |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `SummonerClient(name=...)`      | Instantiates and manages the agent's connection.                                                          |
+| `@client.hook(direction=...)`   | Intercepts all incoming and outgoing messages to enforce cryptographic signing and verification.          |
+| `@client.receive(route="")`     | Buffers the verified, signed messages from players into an internal queue.                                |
+| `@client.send(route="")`        | Periodically drains the buffer, measures the time delta, and constructs the authoritative `batch.report`. |
+| `client.run(host, port, ...)`   | Connects to the server and starts the main networking event loop.                                         |
+
+---
 
 ## How to Run
 
-First, start the Summoner server:
+The `ReportAgent` is a crucial part of the multiplayer setup and must be running for the game to function.
+
+**1. Start the Server**
+This is the central message hub.
+```bash
+# In Terminal 1
+python test_server.py
+````
+
+**2. Start the Report Agent**
+This agent will connect to the server and begin its reporting loop.
 
 ```bash
-python test_server.py
+# In Terminal 2
+python agents/agent_ReportAgent_1/agent.py
+```
+
+**3. Start the Game Clients**
+With the server and reporter running, players can now join.
+
+```bash
+# In Terminal 3 (Player 1)
+python agents/agent_ChatAgent_0/agent.py --name alice
+
+# In Terminal 4 (Player 2)
+python agents/agent_ChatAgent_0/agent.py --name bob
+```

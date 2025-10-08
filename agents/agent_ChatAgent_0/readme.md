@@ -1,149 +1,78 @@
-# `ChatAgent_0`
+# Multiplayer Game Agent
 
-A minimal chat agent that supports two input modes: a standard **single-line prompt** or a **multi-line prompt** using a trailing backslash for continuation (via the `multi_ainput` helper in [`multi_ainput.py`](./multi_ainput.py)). This agent provides a simple user interface for a send/receive pipeline with `SummonerClient`.
+This agent is a fully-featured, secure, peer-to-peer multiplayer game client built with Pygame. It demonstrates a complete gameplay loop, including a lobby, active gameplay, and a game-over state, all synchronized through a `ReportAgent`.
 
-## Behavior
+---
 
-<details>
-<summary><b>(Click to expand)</b> The agent goes through these steps:</summary>
-<br>
+## Gameplay Features
 
-1. On startup, the agent parses the CLI argument `--multiline 0|1` to select the input mode.
+* **Lobby System**: When clients connect, they enter a waiting lobby where they can see all other connected players. The game starts when any player presses the **SPACEBAR**.
+* **Live Gameplay**: Players control a colored square with the **WASD** keys and fire projectiles with a **mouse click**.
+* **Health and Combat**: Each player has **10 health**. Projectiles deal **1 damage**. A player is eliminated when their health reaches zero.
+* **Win Condition**: The last player with health remaining wins the game, at which point a "Game Over" screen is displayed declaring the winner.
 
-   * Default is one-line input using `ainput("> ")`.
+---
 
-2. When a message arrives (`@client.receive(route="custom_receive")`), the handler:
+## Technical Features
 
-   * extracts `content` when the inbound payload is a dict holding a `"content"` field, otherwise uses the raw message,
-   * prints `[From server]` when the text starts with `"Warning:"`, or `[Received]` otherwise,
-   * redraws a primary prompt indicator `> ` on the next line.
+* **Peer-to-Peer Synchronization**: The game state is synchronized without a central game server. Each client processes a stream of events from a `ReportAgent` to build an identical simulation.
+* **Cryptographic Identity**: Each player has a unique identity secured by a public/private key pair. All actions are digitally signed to prove their origin.
+* **Authoritative Clock**: Player and projectile movement is timed by the `deltaTiming` value provided by the `ReportAgent`, ensuring smooth, consistent physics regardless of client performance or network lag.
+* **Anti-Cheat**: The game features peer-side enforcement for game rules. For example, if a modified client attempts to fire faster than the allowed cooldown, their invalid shots are ignored by all other players.
 
-3. When sending (`@client.send(route="custom_send")`), the agent:
+---
 
-   * uses `multi_ainput("> ", "~ ", "\\")` if `--multiline 1` to accept multi-line input,
-   * treats a trailing backslash `\` as a continuation signal and removes it from the echoed line after Enter,
-   * accounts for wrapped lines and wide Unicode when rewriting the line,
-   * returns one string with real newline characters between lines,
-   * or, if `--multiline 0`, reads a single line with `ainput("> ")`.
+## How to Set Up a Multiplayer Game
 
-4. To run continuously, the client calls `client.run(...)` and drives the async receive and send coroutines until interrupted.
+Setting up a multiplayer match involves running three components: the server, the reporter agent, and at least two game agents (one for each player).
 
-</details>
+### Step 1: Generate Player Identities
 
-## SDK Features Used
+Before playing, you need to create a unique cryptographic identity for each player. Use the included `login.py` script with a `--name` argument.
 
-| Feature                      | Description                                                   |
-| ---------------------------- | ------------------------------------------------------------- |
-| `SummonerClient(name=...)`   | Instantiates and manages the agent context                    |
-| `@client.receive(route=...)` | Handles inbound messages and prints a tagged display          |
-| `@client.send(route=...)`    | Reads user input (one-line or multi-line) and returns payload |
-| `client.run(...)`            | Connects to the server and starts the asyncio event loop      |
-
-
-## How to Run
-
-First, start the Summoner server:
+Open a terminal and run the following commands:
 
 ```bash
-python server.py
+# Create an identity for player "alice"
+python agents/agent_ChatAgent_0/login.py --name alice
+
+# Create an identity for player "bob"
+python agents/agent_ChatAgent_0/login.py --name bob
 ```
 
-> [!TIP]
-> You can use the option `--config configs/server_config_nojsonlogs.json` for cleaner terminal output and log files.
-
-Then, run the chat agent. You can choose one-line or multi-line input.
-
-* To use one-line input, press Enter to send immediately. The backslash has no special meaning in this mode.
-
-  ```bash
-  # One-line input (default)
-  python agents/agent_ChatAgent_0/agent.py
-  ```
-
-* To use multi-line input, end a line with a trailing backslash to continue on the next line. The backslash is removed from the echo and a continuation prompt `~ ` appears.
-
-  ```bash
-  # Multi-line input with backslash continuation (1 = enabled, 0 = disabled)
-  python agents/agent_ChatAgent_0/agent.py --multiline 1
-  ```
-
-## Simulation Scenarios
-
-This scenario runs one server and two agents so you can compare multi-line and single-line behavior side by side.
+### Step 2: Run the Server
 
 ```bash
-# Terminal 1 (server)
-python server.py
-
-# Terminal 2 (ChatAgent_0, multiline)
-python agents/agent_ChatAgent_0/agent.py --multiline 1
-
-# Terminal 3 (ChatAgent_0, single line)
-python agents/agent_ChatAgent_0/agent.py
+# In a new terminal (Terminal 1)
+# Remember to tweak the `rate_limit_msgs_per_minute` of `test_server_config.json` to 36000
+python test_server.py
 ```
 
-**Step 1. Compose the first line with continuation in Terminal 2, then press Enter.**
-The agent removes the trailing backslash from the echoed line and prepares a continuation line.
+### Step 3: Start the Reporter
 
-```
-python agents/agent_ChatAgent_0/agent.py --multiline 1
-[DEBUG] Loaded config from: configs/client_config.json
-2025-08-18 13:39:14.754 - ChatAgent_0 - INFO - Connected to server @(host=127.0.0.1, port=8888)
-> Hello\
+```bash
+# In a new terminal (Terminal 2)
+python agents/agent_ReportAgent_1/agent.py
 ```
 
-After Enter, the terminal rewrites the line without the backslash and shows the continuation prompt:
+### Step 4: Start the Game Clients
 
-```
-> Hello
-~ 
-```
+```bash
+# In a new terminal (Terminal 3), start a client for "alice"
+python agents/agent_ChatAgent_0/agent.py --name alice
 
-**Step 2. Type the continuation in Terminal 2 and press Enter.**
-The agent sends one payload that contains a single string with a real newline between the two lines.
-
-```
-> Hello
-~ How are you?
+# In a new terminal (Terminal 4), start a client for "bob"
+python agents/agent_ChatAgent_0/agent.py --name bob
 ```
 
-**Step 3. Respond from Terminal 3 using single-line mode.**
-In single-line mode, Enter sends immediately and the backslash is just a normal character.
+Two Pygame windows will appear. You will see both players in the lobby in each window.
 
-```
-python agents/agent_ChatAgent_0/agent.py
-[DEBUG] Loaded config from: configs/client_config.json
-2025-08-18 13:39:22.108 - ChatAgent_0 - INFO - Connected to server @(host=127.0.0.1, port=8888)
-[Received] Hello
-How are you?
-> Good! Thanks you
-```
+### Step 5: Play the Game!
 
-**Step 4. Try a backslash in single-line mode to see the difference.**
-Since backslash has no special meaning here, pressing Enter sends the line as is. The receiving side will see the backslash in the content.
+In either game window, press the SPACEBAR to start the match. The game will begin for all players.
 
-```
-python agents/agent_ChatAgent_0/agent.py
-[DEBUG] Loaded config from: configs/client_config.json
-2025-08-18 13:39:22.108 - ChatAgent_0 - INFO - Connected to server @(host=127.0.0.1, port=8888)
-[Received] Hello
-How are you?
-> Good! Thanks you
-> How about you?\
-> All good?                        
-> 
-```
+Use WASD to move your player.
 
-On the multi-line side (Terminal 2), those single-line messages arrive exactly as sent, including the literal backslash:
+Click the mouse to fire projectiles at your opponent.
 
-```
-python agents/agent_ChatAgent_0/agent.py --multiline 1
-[DEBUG] Loaded config from: configs/client_config.json
-2025-08-18 13:39:14.754 - ChatAgent_0 - INFO - Connected to server @(host=127.0.0.1, port=8888)
-> Hello
-~ How are you?
-[Received] Good! Thanks you
-[Received] How about you?\
-[Received] All good?
-> 
-```
+The last player with health remaining wins!
