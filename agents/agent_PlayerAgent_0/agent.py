@@ -127,7 +127,7 @@ async def receiver_handler(msg: dict) -> None:
     try:
         report = BatchReportRequest.model_validate(msg["payload"])
         
-        # --- NEW: Individually verify each event in the batch ---
+        # --- Individually verify each event in the batch ---
         verified_events = []
         for event_dict in report.params.deltaEvents:
             try:
@@ -147,7 +147,7 @@ async def receiver_handler(msg: dict) -> None:
                 # If the inner event is malformed or its signature is invalid, discard it silently.
                 continue
         
-        # --- MODIFIED: Use the new, cleaned list of events ---
+        # --- Use the new, cleaned list of events ---
         # Create a new BatchReportParams object with only the verified events.
         # This ensures the game engine only processes authenticated actions.
         verified_report_params = BatchReportParams(
