@@ -1,4 +1,4 @@
-# `ReportAgent_1` - The Game Clock and Event Reporter
+# `ReportAgent_3` - The Game Clock and Event Reporter
 
 This agent serves a critical and specialized role: it is the **authoritative clock and event aggregator** for the multiplayer game. It does not contain any game logic itself. Instead, it listens for actions from all game clients, verifies their authenticity, bundles them into timed reports, and broadcasts these reports back to all players.
 
@@ -64,18 +64,20 @@ This agent will connect to the server and begin its reporting loop.
 
 ```bash
 # In Terminal 2
-python agents/agent_ReportAgent_1/agent.py
+python agents/agent_ReportAgent_3/agent.py
 ```
 
 **3. Start the Game Clients**
 With the server and reporter running, players can now join.
 
 ```bash
+# Be sure to initialize the players (see agent_PlayerAgent_0)
+
 # In Terminal 3 (Player 1)
-python agents/agent_ChatAgent_0/agent.py --name alice
+python agents/agent_PlayerAgent_0/agent.py --name alice
 
 # In Terminal 4 (Player 2)
-python agents/agent_ChatAgent_0/agent.py --name bob
+python agents/agent_PlayerAgent_0/agent.py --name bob
 ```
 
 -----
