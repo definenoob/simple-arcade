@@ -7,6 +7,13 @@ import uuid
 import json
 import random
 from typing import Union, Literal, Dict, Any, List
+# Import libraries needed to handle command-line arguments and file paths.
+import argparse
+import os
+import sys
+# Import libraries for time (for cooldowns) and math (for vector calculations).
+import time
+from math import sqrt
 
 # Import Pygame for graphics, windowing, and input handling.
 import pygame
@@ -26,6 +33,14 @@ from crypto_utils import (
     verify_signature,
 )
 
+# ---- Section 1.5: Argument Parsing for Client Identity ---------------------
+# This section runs as soon as the script starts. It reads command-line arguments
+# to figure out which player identity (and corresponding keys) to use.
+parser = argparse.ArgumentParser(description="Run a game client with a specific identity.")
+parser.add_argument('--name', type=str, required=True, help='The name of the key directory to use for this client (e.g., alice).')
+args = parser.parse_args()
+
+
 # ---- Section 2: Game and Pygame Global Setup -------------------------------
 # Define screen dimensions for the game window.
 SCREEN_WIDTH = 800
@@ -33,60 +48,84 @@ SCREEN_HEIGHT = 600
 # Define the size of the player's character square.
 PLAYER_SIZE = 40
 # Define the player's movement speed in pixels per second.
-# This ensures movement is consistent regardless of the frame rate.
 PLAYER_SPEED_PER_SECOND = 1500
 # A global variable to manage the game's state, starting in the lobby.
-GAME_STATE = "WAITING"  # Can be "WAITING" or "ACTIVE"
+GAME_STATE = "WAITING"  # Can be "WAITING", "ACTIVE", or "GAME_OVER"
 # The global game state dictionary. It will store data for all players, keyed by their unique public key.
-players = {} # e.g., { "public_key_of_player1": {"x": 100, "y": 150, "color": (r,g,b)} }
+players = {} # e.g., { "public_key": {"x": 100, "y": 150, "color": (r,g,b), "health": 10, "last_shot_time": 0.0} }
 # A state dictionary to track which movement keys are currently being held down for continuous movement.
 keys_down = {"w": False, "a": False, "s": False, "d": False}
+
+# ---- Gameplay Mechanics Setup ----
+# A global list to hold all active projectiles in the game world.
+projectiles = []
+# Defines projectile speed in pixels per second.
+PROJECTILE_SPEED_PER_SECOND = 400
+# Defines the size of a projectile.
+PROJECTILE_SIZE = 5
+# Cooldown period for shooting, in seconds. This is the official rule of the game.
+SHOOT_COOLDOWN = 0.5
+# Tracks the time of the last shot to enforce the cooldown *locally* (prevents sending invalid messages).
+local_last_shot_time = 0
+# The maximum health each player starts with.
+MAX_HEALTH = 10
+# Stores the ID of the winning player when the game ends.
+winner_id = None
 
 # Initialize all the imported Pygame modules.
 pygame.init()
 # Create the main display surface (the game window).
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 # Set the title of the game window.
-pygame.display.set_caption("Multiplayer Game Client (Press ESC to quit)")
+pygame.display.set_caption(f"Multiplayer Game Client: {args.name} (Press ESC to quit)")
 # Set up fonts for rendering text on the screen.
 font = pygame.font.SysFont(None, 50)
 small_font = pygame.font.SysFont(None, 24)
 # Create an asynchronous queue to hold player actions (like moving or starting the game).
-# This decouples input handling from message sending.
 action_queue = asyncio.Queue()
 # Instantiate the Summoner client, giving it a unique name to avoid conflicts with other clients.
 client = SummonerClient(name=f"GameAgent_{str(uuid.uuid4())[:8]}")
 
 # ---- Section 3: Cryptographic Setup ----------------------------------------
-# Load this client's private key from its key file. This is used for *signing* outgoing messages.
-CLIENT_PRIVATE_KEY = load_private_key("keys/client_private_key.pem")
-# Load this client's public key, export it as a string. This is sent with messages so others can *verify* them.
-CLIENT_PUBLIC_KEY_STR = load_public_key("keys/client_public_key.pem").export_key().decode('utf-8')
+# Construct the path to the key files based on the provided --name argument.
+key_directory = os.path.join("keys", args.name)
+private_key_path = os.path.join(key_directory, "client_private_key.pem")
+public_key_path = os.path.join(key_directory, "client_public_key.pem")
+
+# Check if the required key files exist before continuing.
+if not os.path.exists(private_key_path) or not os.path.exists(public_key_path):
+    print(f"Error: Key files not found for identity '{args.name}' in '{key_directory}'.")
+    print(f"Please generate them first by running: python login.py --name {args.name}")
+    sys.exit(1) # Exit the script if keys are missing.
+
+# Load this client's private key from its unique key file.
+CLIENT_PRIVATE_KEY = load_private_key(private_key_path)
+# Load this client's public key, export it as a string.
+CLIENT_PUBLIC_KEY_STR = load_public_key(public_key_path).export_key().decode('utf-8')
+
 
 # ---- Section 4: Type-Safe Data Models (Pydantic) ---------------------------
 # Pydantic models define the expected structure of our data.
-# If data doesn't match the model, a validation error is raised, preventing malformed data.
 
-# Defines the parameters for a player movement action.
 class MoveParams(BaseModel):
     direction: Literal["w", "a", "s", "d"]
 
-# Defines the (empty) parameters for a "start the game" action.
+class PlayerShootParams(BaseModel):
+    target_x: int
+    target_y: int
+
 class GameStartParams(BaseModel):
     pass
 
-# Defines the (empty) parameters for a "player joining" action.
 class PlayerJoinParams(BaseModel):
     pass
 
-# The main JSON-RPC 2.0 request model. It defines the structure for all our game actions.
 class JsonRpcRequest(BaseModel):
     jsonrpc: Literal["2.0"] = "2.0"
-    method: Literal["player.move", "game.start", "player.join"]
-    params: Union[MoveParams, GameStartParams, PlayerJoinParams]
+    method: Literal["player.move", "game.start", "player.join", "player.shoot"]
+    params: Union[MoveParams, GameStartParams, PlayerJoinParams, PlayerShootParams]
     id: Union[str, int] = Field(default_factory=lambda: str(uuid.uuid4()))
 
-# This model defines the structure of the batch reports we expect to receive *from* the ReportAgent.
 class BatchReportParams(BaseModel):
     frameNumber: int
     deltaEvents: List[Dict[str, Any]]
@@ -98,130 +137,143 @@ class BatchReportRequest(BaseModel):
     params: BatchReportParams
     id: Union[str, int]
 
-# A security wrapper for our messages. All outgoing messages will be placed inside this structure.
 class SignedWrapper(BaseModel):
-    payload: Dict[str, Any]  # The original message (e.g., a JsonRpcRequest)
-    signature: str           # The digital signature of the payload
-    public_key: str          # The public key of the sender, so the receiver can verify the signature
+    payload: Dict[str, Any]
+    signature: str
+    public_key: str
 
 # ---- Section 5: Cryptographic Hooks ----------------------------------------
-# Hooks are functions that intercept messages before they are sent or after they are received.
-
 @client.hook(direction=Direction.SEND, priority=1)
 async def sign_outgoing_message(payload: dict) -> dict:
     """This hook intercepts every outgoing message to add a digital signature."""
     try:
-        # The payload must be converted to a consistent string format before signing.
         payload_bytes = json.dumps(payload, sort_keys=True).encode('utf-8')
-        # Sign the message bytes with our private key.
         signature = sign_message(payload_bytes, CLIENT_PRIVATE_KEY)
-        # Wrap the original payload, the new signature, and our public key into the SignedWrapper model.
         signed_wrapper = SignedWrapper(payload=payload, signature=signature, public_key=CLIENT_PUBLIC_KEY_STR)
-        # Return the dictionary version of the wrapper, which will be sent over the network.
         return signed_wrapper.model_dump()
     except Exception as e:
         print(f"[SIGNING ERROR] Failed to sign outgoing message: {e}")
-        return None # Returning None stops the message from being sent.
+        return None
 
 @client.hook(direction=Direction.RECEIVE, priority=1)
 async def verify_incoming_message(payload: dict) -> Union[dict, None]:
     """This hook intercepts every incoming message to verify its authenticity."""
-    # The server might wrap the message; this extracts the actual content.
     message_to_validate = payload.get('content') if isinstance(payload, dict) and 'content' in payload else payload
     if not isinstance(message_to_validate, dict): return None
     try:
-        # Validate that the incoming message conforms to our SignedWrapper structure.
         signed_wrapper = SignedWrapper.model_validate(message_to_validate)
-        # Import the sender's public key (which they included in the message).
         sender_public_key = RSA.import_key(signed_wrapper.public_key.encode('utf-8'))
-        # Recreate the exact original message string that the sender signed.
         original_payload_bytes = json.dumps(signed_wrapper.payload, sort_keys=True).encode('utf-8')
-        # Verify the signature against the payload using the sender's public key.
         if not verify_signature(original_payload_bytes, signed_wrapper.signature, sender_public_key):
-            return None # If the signature is invalid, discard the message.
-        # If valid, pass a clean dictionary with the sender's identity and the verified payload to the receiver.
+            return None
         return {"identity": signed_wrapper.public_key, "payload": signed_wrapper.payload}
     except (ValidationError, Exception):
-        # If the message isn't a SignedWrapper or something else goes wrong, discard it.
         return None
 
 # ---- Section 6: Core Game Logic Handlers -----------------------------------
 @client.receive(route="")
 async def receiver_handler(msg: dict) -> None:
-    """This function handles all verified messages and updates the game state."""
-    global GAME_STATE # We need to modify the global game state
+    """This function handles all verified messages and updates the entire game state."""
+    global GAME_STATE, projectiles, winner_id
     if not isinstance(msg, dict) or "payload" not in msg: return
 
     try:
-        # First, validate that the message is a batch report from the ReportAgent.
         report = BatchReportRequest.model_validate(msg["payload"])
-        # Extract the delta time from the report and convert it from nanoseconds to seconds.
-        # This is the authoritative "tick" of our game clock.
         delta_seconds = report.params.deltaTiming / 1_000_000_000.0
 
-        # Process each individual event that the reporter collected in this batch.
+        if GAME_STATE == "ACTIVE":
+            projectiles_to_remove = set()
+            damage_map = {}
+
+            for proj in projectiles:
+                proj['x'] += proj['vx'] * delta_seconds
+                proj['y'] += proj['vy'] * delta_seconds
+                for p_id, p_data in players.items():
+                    if p_data['health'] > 0 and p_id != proj['owner_id']:
+                        player_rect = pygame.Rect(p_data['x'], p_data['y'], PLAYER_SIZE, PLAYER_SIZE)
+                        if player_rect.collidepoint(proj['x'], proj['y']):
+                            projectiles_to_remove.add(proj['id'])
+                            damage_map[p_id] = damage_map.get(p_id, 0) + 1
+                            break
+                if not (0 < proj['x'] < SCREEN_WIDTH and 0 < proj['y'] < SCREEN_HEIGHT):
+                    projectiles_to_remove.add(proj['id'])
+
+            for p_id, damage in damage_map.items():
+                players[p_id]['health'] = max(0, players[p_id]['health'] - damage)
+            
+            projectiles = [p for p in projectiles if p['id'] not in projectiles_to_remove]
+        
         for event_wrapper_dict in report.params.deltaEvents:
             try:
-                # Validate the inner event as a SignedWrapper from another player.
                 event_wrapper = SignedWrapper.model_validate(event_wrapper_dict)
-                player_id = event_wrapper.public_key # The unique ID of the player who sent the event.
+                player_id = event_wrapper.public_key
                 request = JsonRpcRequest.model_validate(event_wrapper.payload)
 
-                # --- State Change Logic ---
                 if request.method == "game.start":
-                    GAME_STATE = "ACTIVE"
-                    continue # Nothing more to do for this event.
+                    if GAME_STATE == "WAITING": GAME_STATE = "ACTIVE"
+                    continue
 
                 if request.method in ["player.join", "player.move"]:
-                    is_new_player = player_id not in players
-                    # If this is the first time we're hearing from this player...
-                    if is_new_player:
-                        # Use their public key to seed the random number generator.
-                        # This guarantees that every client will generate the exact same starting
-                        # position and color for this new player, preventing desynchronization.
+                    if player_id not in players:
                         random.seed(player_id)
                         players[player_id] = {
                             "x": random.randint(0, SCREEN_WIDTH - PLAYER_SIZE),
                             "y": random.randint(0, SCREEN_HEIGHT - PLAYER_SIZE),
-                            "color": (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255))
+                            "color": (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255)),
+                            "health": MAX_HEALTH,
+                            "last_shot_time": 0.0
                         }
-                        random.seed() # Reset the seed so other random numbers are not deterministic.
-                        
-                        # "Call and Response": If we just discovered a new player,
-                        # we immediately re-broadcast our own presence. This ensures the
-                        # new player learns about us right away.
+                        random.seed()
                         asyncio.create_task(action_queue.put({"type": "join"}))
 
-                # --- Player Movement Logic ---
-                # Only update positions if the game is active and it's a move event.
-                if GAME_STATE == "ACTIVE" and request.method == "player.move":
-                    # Calculate the distance to move based on our speed and the authoritative delta time.
-                    # This makes movement smooth and independent of frame rate or network lag.
-                    move_distance = PLAYER_SPEED_PER_SECOND * delta_seconds
-                    
-                    player = players[player_id]
-                    direction = request.params.direction
-                    if direction == "w": player["y"] -= move_distance
-                    elif direction == "s": player["y"] += move_distance
-                    elif direction == "a": player["x"] -= move_distance
-                    elif direction == "d": player["x"] += move_distance
-                    # Ensure players don't move off-screen.
-                    player["x"] = max(0, min(player["x"], SCREEN_WIDTH - PLAYER_SIZE))
-                    player["y"] = max(0, min(player["y"], SCREEN_HEIGHT - PLAYER_SIZE))
-            except ValidationError:
-                # Ignore any individual event in the batch that is malformed.
+                if GAME_STATE == "ACTIVE" and player_id in players and players[player_id]['health'] > 0:
+                    if request.method == "player.move":
+                        # ---- THE FIX IS HERE ----
+                        # Use the direction from the network message, NOT the local keys_down state.
+                        # This ensures all clients calculate the same movement for every player.
+                        move_distance = PLAYER_SPEED_PER_SECOND * delta_seconds
+                        player = players[player_id]
+                        direction = request.params.direction
+                        if direction == "w": player["y"] -= move_distance
+                        elif direction == "s": player["y"] += move_distance
+                        elif direction == "a": player["x"] -= move_distance
+                        elif direction == "d": player["x"] += move_distance
+                        player["x"] = max(0, min(player["x"], SCREEN_WIDTH - PLAYER_SIZE))
+                        player["y"] = max(0, min(player["y"], SCREEN_HEIGHT - PLAYER_SIZE))
+
+                    elif request.method == "player.shoot":
+                        current_time = time.time()
+                        player_state = players[player_id]
+                        if (current_time - player_state.get('last_shot_time', 0)) > SHOOT_COOLDOWN:
+                            player_state['last_shot_time'] = current_time
+                            start_x = player_state['x'] + PLAYER_SIZE / 2
+                            start_y = player_state['y'] + PLAYER_SIZE / 2
+                            dir_x = request.params.target_x - start_x
+                            dir_y = request.params.target_y - start_y
+                            length = sqrt(dir_x**2 + dir_y**2)
+                            if length > 0:
+                                vx = (dir_x / length) * PROJECTILE_SPEED_PER_SECOND
+                                vy = (dir_y / length) * PROJECTILE_SPEED_PER_SECOND
+                                projectiles.append({
+                                    "x": start_x, "y": start_y, "vx": vx, "vy": vy,
+                                    "owner_id": player_id, "id": str(uuid.uuid4())
+                                })
+            except (ValidationError, KeyError):
                 continue
+        
+        if GAME_STATE == "ACTIVE":
+            active_players = [pid for pid, pdata in players.items() if pdata['health'] > 0]
+            if len(active_players) <= 1:
+                GAME_STATE = "GAME_OVER"
+                winner_id = active_players[0] if active_players else None
+
     except ValidationError:
-        # Ignore any incoming message that is not a valid batch report.
         return
 
 @client.send(route="")
 async def send_handler() -> dict:
-    """This function waits for actions on the queue and sends them to the server."""
-    # This will wait until an action is put on the action_queue by the game_loop.
     action = await action_queue.get()
     request_model = None
-    # Construct the correct Pydantic model based on the action type.
     if action["type"] == "join":
         request_model = JsonRpcRequest(method="player.join", params=PlayerJoinParams())
     elif action["type"] == "start":
@@ -229,74 +281,75 @@ async def send_handler() -> dict:
     elif action["type"] == "move":
         params = MoveParams(direction=action["dir"])
         request_model = JsonRpcRequest(method="player.move", params=params)
-    # Convert the model to a dictionary to be sent. The 'sign_outgoing_message' hook will intercept this.
+    elif action["type"] == "shoot":
+        params = PlayerShootParams(target_x=action["target"][0], target_y=action["target"][1])
+        request_model = JsonRpcRequest(method="player.shoot", params=params)
     return request_model.model_dump()
 
 # ---- Section 7: Main Application Loop --------------------------------------
 async def game_loop():
-    """The main loop that handles input, rendering, and game logic ticks."""
+    global local_last_shot_time
     running = True
     while running:
         try:
-            # --- Input Handling ---
-            # Process all events in Pygame's event queue.
+            our_player_alive = CLIENT_PUBLIC_KEY_STR in players and players[CLIENT_PUBLIC_KEY_STR]['health'] > 0
+            
             for event in pygame.event.get():
                 if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
                     running = False
-                # The SPACE key only works in the WAITING state to start the game.
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and GAME_STATE == "WAITING":
                     await action_queue.put({"type": "start"})
                 
-                # WASD input is only processed when the game is ACTIVE.
-                if GAME_STATE == "ACTIVE":
+                if GAME_STATE == "ACTIVE" and our_player_alive:
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        current_time = time.time()
+                        if (current_time - local_last_shot_time) > SHOOT_COOLDOWN:
+                            local_last_shot_time = current_time
+                            await action_queue.put({"type": "shoot", "target": event.pos})
+                    
                     if event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_w: keys_down["w"] = True
-                        elif event.key == pygame.K_a: keys_down["a"] = True
-                        elif event.key == pygame.K_s: keys_down["s"] = True
-                        elif event.key == pygame.K_d: keys_down["d"] = True
+                        key_name = pygame.key.name(event.key)
+                        if key_name in keys_down:
+                            keys_down[key_name] = True
                     elif event.type == pygame.KEYUP:
-                        if event.key == pygame.K_w: keys_down["w"] = False
-                        elif event.key == pygame.K_a: keys_down["a"] = False
-                        elif event.key == pygame.K_s: keys_down["s"] = False
-                        elif event.key == pygame.K_d: keys_down["d"] = False
+                        key_name = pygame.key.name(event.key)
+                        if key_name in keys_down:
+                            keys_down[key_name] = False
 
-            # --- Action Generation for Continuous Movement ---
-            # In every frame, if a key is held down, put a move action on the queue.
-            if GAME_STATE == "ACTIVE":
-                if keys_down["w"]: await action_queue.put({"type": "move", "dir": "w"})
-                if keys_down["a"]: await action_queue.put({"type": "move", "dir": "a"})
-                if keys_down["s"]: await action_queue.put({"type": "move", "dir": "s"})
-                if keys_down["d"]: await action_queue.put({"type": "move", "dir": "d"})
+            if GAME_STATE == "ACTIVE" and our_player_alive:
+                for key, pressed in keys_down.items():
+                    if pressed:
+                        await action_queue.put({"type": "move", "dir": key})
 
-            # --- Rendering ---
-            # Clear the screen with a dark background.
             screen.fill((25, 25, 35))
-            # Render the appropriate scene based on the current game state.
             if GAME_STATE == "WAITING":
-                # Draw players that have already joined the lobby.
                 for player_id, data in players.items():
-                    rect = pygame.Rect(data["x"], data["y"], PLAYER_SIZE, PLAYER_SIZE)
-                    pygame.draw.rect(screen, data["color"], rect)
-                # Display lobby text.
+                    pygame.draw.rect(screen, data["color"], pygame.Rect(data["x"], data["y"], PLAYER_SIZE, PLAYER_SIZE))
                 count_text = font.render(f"{len(players)} Players Connected", True, (255, 255, 255))
                 start_text = font.render("Press SPACE to Start", True, (200, 200, 200))
                 screen.blit(count_text, (SCREEN_WIDTH/2 - count_text.get_width()/2, 40))
                 screen.blit(start_text, (SCREEN_WIDTH/2 - start_text.get_width()/2, 90))
-            elif GAME_STATE == "ACTIVE":
-                # Draw all players at their current positions.
-                for player_id, data in players.items():
-                    rect = pygame.Rect(data["x"], data["y"], PLAYER_SIZE, PLAYER_SIZE)
-                    pygame.draw.rect(screen, data["color"], rect)
-                    # Use the last characters of the public key's last line for the name.
-                    id_snippet = player_id.splitlines()[-2][-10:]
-                    text_surface = small_font.render(id_snippet, True, (255, 255, 255))
-                    screen.blit(text_surface, (data["x"], data["y"] - 20))
+            
+            elif GAME_STATE == "ACTIVE" or GAME_STATE == "GAME_OVER":
+                for p_id, p_data in players.items():
+                    if p_data['health'] > 0:
+                        pygame.draw.rect(screen, (100, 0, 0), pygame.Rect(p_data['x'], p_data['y'] - 15, PLAYER_SIZE, 10))
+                        health_width = (p_data['health'] / MAX_HEALTH) * PLAYER_SIZE
+                        pygame.draw.rect(screen, (0, 200, 0), pygame.Rect(p_data['x'], p_data['y'] - 15, health_width, 10))
+                        pygame.draw.rect(screen, p_data["color"], pygame.Rect(p_data['x'], p_data['y'], PLAYER_SIZE, PLAYER_SIZE))
+                
+                for proj in projectiles:
+                    pygame.draw.circle(screen, (255, 255, 100), (proj['x'], proj['y']), PROJECTILE_SIZE)
 
-            # Update the full display surface to the screen.
+                if GAME_STATE == "GAME_OVER":
+                    over_text = font.render("GAME OVER", True, (255, 0, 0))
+                    screen.blit(over_text, (SCREEN_WIDTH/2 - over_text.get_width()/2, SCREEN_HEIGHT/2 - 50))
+                    if winner_id and winner_id in players:
+                        winner_snippet = winner_id.splitlines()[-2][-10:]
+                        winner_text = font.render(f"Winner: {winner_snippet}", True, players[winner_id]['color'])
+                        screen.blit(winner_text, (SCREEN_WIDTH/2 - winner_text.get_width()/2, SCREEN_HEIGHT/2 + 10))
+
             pygame.display.flip()
-            # CRITICAL: Yield control to the asyncio event loop. This allows the background
-            # networking tasks (like receiving messages) to run. Without this, the
-            # game loop would block everything and no messages would ever be received.
             await asyncio.sleep(0.016) # Aim for ~60 FPS
         except asyncio.CancelledError:
             running = False
@@ -309,18 +362,12 @@ async def game_loop():
 # ---- Section 8: Main Execution Block ---------------------------------------
 if __name__ == "__main__":
     try:
-        # Get the main asyncio event loop.
         loop = asyncio.get_event_loop()
-        # Start the game loop as a background task.
         loop.create_task(game_loop())
-        # Immediately send an initial 'join' message to announce our presence to the network.
         loop.call_soon(lambda: asyncio.create_task(action_queue.put({"type": "join"})))
-        # Start the Summoner client. This is a blocking call that runs the networking loop
-        # until the program is interrupted.
         client.run(host="127.0.0.1", port=8888)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("Shutdown requested.")
     finally:
-        # Cleanly shut down Pygame when the client is closed.
         if pygame.get_init(): pygame.quit()
         print("Client and Pygame shut down cleanly.")
