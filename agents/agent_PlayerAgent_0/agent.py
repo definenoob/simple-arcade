@@ -68,9 +68,21 @@ if not os.path.exists(private_key_path) or not os.path.exists(public_key_path):
     print(f"Please generate them first by running: python login.py --name {args.name}")
     sys.exit(1)
 
-# Load keys.
+# Load client's keys.
 CLIENT_PRIVATE_KEY = load_private_key(private_key_path)
 CLIENT_PUBLIC_KEY_STR = load_public_key(public_key_path).export_key().decode('utf-8')
+
+# Construct path to server's public key.
+server_public_key_path = os.path.join("keys", "server_public_key.pem")
+
+# Check if server key file exists.
+if not os.path.exists(server_public_key_path):
+    print(f"Error: Server's public key not found at '{server_public_key_path}'.")
+    sys.exit(1)
+
+# Load server's public key for trusting batch reports.
+SERVER_PUBLIC_KEY = load_public_key(server_public_key_path)
+SERVER_PUBLIC_KEY_STR = SERVER_PUBLIC_KEY.export_key().decode('utf-8')
 
 
 # ---- Section 5: Cryptographic Hooks ----------------------------------------
@@ -118,12 +130,26 @@ async def verify_incoming_message(payload: dict) -> Union[dict, None]:
 @client.receive(route="")
 async def receiver_handler(msg: dict) -> None:
     """
-    Handles verified batch reports, individually verifies each event within the batch,
-    and then passes the cleaned batch to the GameEngine for processing.
+    Handles verified batch reports from the trusted server, individually verifies
+    each event within the batch, and then passes the cleaned batch to the
+    GameEngine for processing.
     """
-    if not isinstance(msg, dict) or "payload" not in msg or game_engine is None:
+    if not isinstance(msg, dict) or "payload" not in msg or "identity" not in msg or game_engine is None:
         return
 
+    # --- Trust Verification: Ensure the batch report is from the server ---
+    # Only process messages that are batch reports.
+    if msg["payload"].get("method") != "batch.report":
+        return  # Ignore non-report messages at this handler.
+
+    # Verify that the sender's public key matches our trusted server key.
+    if msg["identity"] != SERVER_PUBLIC_KEY_STR:
+        print("[SECURITY WARNING] Discarding batch report from untrusted source.")
+        return
+
+    # If we reach here, the batch report's signature has been verified by the
+    # 'verify_incoming_message' hook, and the sender's identity is confirmed
+    # to be the trusted server. Now, we process the contents.
     try:
         report = BatchReportRequest.model_validate(msg["payload"])
         
